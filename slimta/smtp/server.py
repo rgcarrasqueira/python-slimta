@@ -32,7 +32,6 @@ import re
 from gevent.ssl import SSLError
 from gevent.socket import timeout as socket_timeout
 from gevent import Timeout
-from gevent.timeout import Timeout as TimeoutHappened
 
 from . import SmtpError, ConnectionLost
 from .datareader import DataReader
@@ -127,29 +126,22 @@ class Server(object):
         self.data_timeout = data_timeout or command_timeout
 
     def _recv_command(self):
-        timeout = Timeout(self.command_timeout)
-        timeout.start()
-        try:
+        with Timeout(self.command_timeout):
             return self.io.recv_command()
-        finally:
-            timeout.cancel()
 
     def _get_message_data(self):
         max_size = self.extensions.getparam('SIZE', filter=int)
         reader = DataReader(self.io, max_size)
 
         err = None
-        timeout = Timeout(self.data_timeout)
-        timeout.start()
-        try:
-            data = reader.recv()
-        except ConnectionLost:
-            raise
-        except SmtpError as e:
-            data = None
-            err = e
-        finally:
-            timeout.cancel()
+        with Timeout(self.data_timeout):
+            try:
+                data = reader.recv()
+            except ConnectionLost:
+                raise
+            except SmtpError as e:
+                data = None
+                err = e
 
         reply = Reply('250', '2.6.0 Message Accepted for Delivery')
         self._call_custom_handler('HAVE_DATA', reply, data, err)
@@ -193,30 +185,26 @@ class Server(object):
         command, arg = 'BANNER_', None
         while True:
             try:
-                if command:
-                    self._handle_command(command, arg)
-                else:
-                    unknown_command.send(self.io)
-            except StopIteration:
-                break
-            except ConnectionLost:
-                raise
-            except TimeoutHappened:
-                timed_out.send(self.io)
-                self.io.flush_send()
-                break
-            except Exception as e:
-                unhandled_error.send(self.io)
-                raise
-            finally:
-                self.io.flush_send()
+                try:
+                    if command:
+                        self._handle_command(command, arg)
+                    else:
+                        unknown_command.send(self.io)
+                except StopIteration:
+                    break
+                except ConnectionLost:
+                    raise
+                except Exception as e:
+                    unhandled_error.send(self.io)
+                    raise
+                finally:
+                    self.io.flush_send()
 
-            try:
                 command, arg = self._recv_command()
-            except TimeoutHappened:
+            except Timeout:
                 timed_out.send(self.io)
                 self.io.flush_send()
-                break
+                raise ConnectionLost()
 
     def _gather_params(self, remaining):
         params = {}
